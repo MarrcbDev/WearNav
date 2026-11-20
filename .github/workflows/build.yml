@@ -25,5 +25,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: WearBrowser-apk
+          name: WearNav-apk
           path: app/build/outputs/apk/release/*.apk

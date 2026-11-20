@@ -1,4 +1,4 @@
-# WearBrowser
+# WearNav
 
 Navegador ligero para Wear OS (probado en la idea para Galaxy Watch 5 Pro, pantalla redonda 450x450).
 
@@ -10,7 +10,7 @@ Navegador ligero para Wear OS (probado en la idea para Galaxy Watch 5 Pro, panta
 - Gestión de RAM: pausa al salir, destruye el WebView a los 45 s en segundo plano (restaura el historial al volver), reacciona a onTrimMemory y al cierre del renderizador
 
 ## Compilar
-Sube todo a GitHub (rama `main`) -> pestaña **Actions** -> "Build APK" -> descarga el artefacto `WearBrowser-apk`.
+Sube todo a GitHub (rama `main`) -> pestaña **Actions** -> "Build APK" -> descarga el artefacto `WearNav-apk`.
 
 ## Instalar en el reloj
 Reloj: Ajustes > Opciones de desarrollador > Depuración ADB + Depuración por Wi-Fi
@@ -19,3 +19,10 @@ adb pair IP:PUERTO_EMPAREJAMIENTO
 adb connect IP:PUERTO
 adb install -r app-release.apk
 ```
+
+## Si se cierra al abrir
+WearNav guarda el motivo del cierre y lo muestra en pantalla al reabrir. Si quieres el log completo:
+```
+adb logcat -b crash
+```
+Si el error menciona "WebView", actualiza/instala *Android System WebView* desde Play Store en el reloj.
