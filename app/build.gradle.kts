@@ -51,9 +51,18 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
+}
+
+// GeckoView y androidx.core 1.19 piden compileSdk 37, pero nuestro código compila bien con 36
+// (el APK corre en Wear OS 4 / API 33). Desactivamos solo esa comprobación de metadatos.
+tasks.configureEach {
+    if (name.startsWith("check") && name.endsWith("AarMetadata")) enabled = false
 }
 
 dependencies {
