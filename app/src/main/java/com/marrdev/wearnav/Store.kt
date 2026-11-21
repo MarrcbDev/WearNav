@@ -20,9 +20,9 @@ class Store(ctx: Context) {
         get() = p.getBoolean("adblock", true)
         set(v) = p.edit().putBoolean("adblock", v).apply()
 
-    var noImages: Boolean
-        get() = p.getBoolean("noimg", false)
-        set(v) = p.edit().putBoolean("noimg", v).apply()
+    var autoFree: Boolean
+        get() = p.getBoolean("autofree", true)
+        set(v) = p.edit().putBoolean("autofree", v).apply()
 
     var desktop: Boolean
         get() = p.getBoolean("desktop", false)
@@ -36,13 +36,17 @@ class Store(ctx: Context) {
         get() = p.getBoolean("round", true)
         set(v) = p.edit().putBoolean("round", v).apply()
 
+    var mainOnly: Boolean
+        get() = p.getBoolean("mainOnly", true)
+        set(v) = p.edit().putBoolean("mainOnly", v).apply()
+
     var engine: Int
         get() = p.getInt("engine", 0)
         set(v) = p.edit().putInt("engine", v).apply()
 
-    var widthIdx: Int
-        get() = p.getInt("widthIdx", 0)
-        set(v) = p.edit().putInt("widthIdx", v).apply()
+    var densityIdx: Int
+        get() = p.getInt("densityIdx", 2)
+        set(v) = p.edit().putInt("densityIdx", v).apply()
 
     // ---- listas ----
     private fun read(key: String): MutableList<Entry> {

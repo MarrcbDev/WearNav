@@ -8,6 +8,11 @@ import java.io.StringWriter
 class WearNavApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        try {
+            Net.initCache(this)
+            Net.resetCookies()
+        } catch (_: Throwable) {
+        }
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {

@@ -1,6 +1,5 @@
 package com.marrdev.wearnav
 
-import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.ActivityNotFoundException
@@ -17,40 +16,32 @@ import android.speech.RecognizerIntent
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
-import android.view.InputDevice
-import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.webkit.CookieManager
-import android.webkit.RenderProcessGoneDetail
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebStorage
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewFeature
-import java.io.ByteArrayInputStream
+import org.mozilla.geckoview.ContentBlocking
+import org.mozilla.geckoview.GeckoResult
+import org.mozilla.geckoview.GeckoRuntime
+import org.mozilla.geckoview.GeckoRuntimeSettings
+import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.StorageController
 
 class MainActivity : Activity() {
 
     companion object {
-        const val HOME_HOST = "wb.home"
-        const val HOME = "https://wb.home/"
-        const val DESKTOP_UA =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        // GeckoRuntime solo puede crearse una vez por proceso
+        var sRuntime: GeckoRuntime? = null
+
         const val REQ_VOICE = 11
-        const val IDLE_DESTROY_MS = 45_000L
+        const val IDLE_KILL_MS = 90_000L
 
         // nombre, action del formulario de la home, prefijo de búsqueda
         val ENGINES = listOf(
@@ -58,10 +49,9 @@ class MainActivity : Activity() {
             Triple("Google", "https://www.google.com/search", "https://www.google.com/search?q="),
             Triple("Brave", "https://search.brave.com/search", "https://search.brave.com/search?q=")
         )
-        val WIDTHS = intArrayOf(0, 360, 480)
 
-        const val READER_JS =
-            """(function(){var r=document.querySelector('article')||document.querySelector('main')||document.body;var n=r.querySelectorAll('h1,h2,h3,p,li');var out=document.createDocumentFragment();var c=0;for(var i=0;i<n.length&&c<500;i++){var t=(n[i].innerText||'').trim();if(t.length<3)continue;var tg=n[i].tagName.toLowerCase();var e=document.createElement(tg==='li'?'p':tg);e.textContent=(tg==='li'?'• ':'')+t;out.appendChild(e);c++;}document.head.innerHTML='<meta name="viewport" content="width=device-width"><style>body{background:#000;color:#ddd;font:18px/1.55 sans-serif;padding:0 8px 80px;margin:0}h1,h2,h3{color:#fff;line-height:1.25}h1{font-size:22px}h2{font-size:20px}h3{font-size:19px}</style>';document.body.innerHTML='';document.body.removeAttribute('style');document.body.removeAttribute('class');document.body.appendChild(out);window.scrollTo(0,0);})();"""
+        // Densidad virtual: menor = más contenido por pantalla. 1.5 deja ~300 px CSS de ancho en el reloj.
+        val DENSITIES = floatArrayOf(1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
     }
 
     private lateinit var store: Store
@@ -72,19 +62,23 @@ class MainActivity : Activity() {
     private lateinit var reloadBtn: TextView
     private lateinit var panel: FrameLayout
 
-    private var web: WebView? = null
-    private var savedState: Bundle? = null
-    private var barVisible = true
+    private var geckoView: GeckoView? = null
+    private var session: GeckoSession? = null
+
+    private var curUrl = ""
+    private var curTitle = ""
+    private var canBack = false
+    private var canFwd = false
     private var loading = false
-    private var pageError = false
+    private var lastScrollY = 0
+    private var barVisible = true
+    private var fullscreen = false
     private var stopped = true
     private var crashMode = false
     private var lastTitle = ""
-    private var customView: View? = null
-    private var customCb: WebChromeClient.CustomViewCallback? = null
 
     private val handler = Handler(Looper.getMainLooper())
-    private val idleDestroy = Runnable { destroyWeb(true) }
+    private val idleKill = Runnable { shutdownEngine() }
 
     // ------------------------------------------------------------------ ciclo de vida
 
@@ -124,9 +118,9 @@ class MainActivity : Activity() {
         setContentView(root)
 
         applyFit()
-        createWeb()
+        createSession()
         val start = intent?.data?.toString() ?: store.lastUrl
-        web?.loadUrl(if (start.isBlank()) HOME else start)
+        session?.loadUri(if (start.isBlank()) homeUrl() else start)
     }
 
     private fun showCrash(msg: String) {
@@ -180,269 +174,224 @@ class MainActivity : Activity() {
         super.onStart()
         if (crashMode) return
         stopped = false
-        handler.removeCallbacks(idleDestroy)
-        if (web == null) ensureWeb(true) else {
-            web?.onResume()
-            web?.resumeTimers()
-        }
+        handler.removeCallbacks(idleKill)
+        session?.setActive(true)
     }
 
     override fun onStop() {
         super.onStop()
         if (crashMode) return
         stopped = true
-        web?.let {
-            it.onPause()
-            it.pauseTimers()
-        }
-        // Si el usuario no vuelve en 45 s, liberamos el WebView completo (la RAM baja mucho)
-        handler.postDelayed(idleDestroy, IDLE_DESTROY_MS)
+        session?.setActive(false)
+        // Gecko es pesado: si no vuelves en 90 s, cerramos el proceso entero (la URL queda guardada)
+        if (store.autoFree) handler.postDelayed(idleKill, IDLE_KILL_MS)
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(idleDestroy)
-        if (!crashMode) web?.let {
-            webHolder.removeView(it)
-            it.destroy()
-        }
-        web = null
+        handler.removeCallbacks(idleKill)
         super.onDestroy()
     }
 
-    override fun onTrimMemory(level: Int) {
-        super.onTrimMemory(level)
-        if (level >= TRIM_MEMORY_BACKGROUND && stopped) destroyWeb(true)
-        else if (level >= TRIM_MEMORY_RUNNING_LOW) web?.clearCache(false)
-    }
-
-    override fun onLowMemory() {
-        super.onLowMemory()
-        web?.clearCache(false)
+    /** Cierra la app y mata el proceso para liberar toda la RAM de Gecko. */
+    private fun shutdownEngine() {
+        if (!stopped) return
+        finishAndRemoveTask()
+        Process.killProcess(Process.myPid())
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
         when {
             crashMode -> super.onBackPressed()
-            customView != null -> hideCustom()
+            fullscreen -> session?.exitFullScreen()
             panel.visibility == View.VISIBLE -> closePanel()
-            web?.canGoBack() == true -> web?.goBack()
+            canBack -> session?.goBack()
             else -> super.onBackPressed()
         }
     }
 
-    // Corona/bisel giratorio (en relojes que lo tengan) = scroll
-    override fun onGenericMotionEvent(e: MotionEvent): Boolean {
-        if (e.action == MotionEvent.ACTION_SCROLL && e.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
-            val d = -e.getAxisValue(MotionEvent.AXIS_SCROLL) * dp(40)
-            web?.scrollBy(0, d.toInt())
-            return true
-        }
-        return super.onGenericMotionEvent(e)
+    // ------------------------------------------------------------------ Gecko
+
+    private fun runtime(): GeckoRuntime {
+        sRuntime?.let { return it }
+        val settings = GeckoRuntimeSettings.Builder()
+            .javaScriptEnabled(true)
+            .remoteDebuggingEnabled(false)
+            .consoleOutput(false)
+            .build()
+        val rt = GeckoRuntime.create(applicationContext, settings)
+        sRuntime = rt
+        applyRuntimeSettings(rt)
+        return rt
     }
 
-    // ------------------------------------------------------------------ WebView
+    private fun applyRuntimeSettings(rt: GeckoRuntime) {
+        val s = rt.settings
+        s.setPreferredColorScheme(
+            if (store.dark) GeckoRuntimeSettings.COLOR_SCHEME_DARK else GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
+        )
+        s.setDisplayDensityOverride(DENSITIES[store.densityIdx.coerceIn(0, DENSITIES.lastIndex)])
+        s.setFontSizeFactor(store.textZoom / 100f)
+        val mask = ContentBlocking.AntiTracking.AD or ContentBlocking.AntiTracking.ANALYTIC or
+            ContentBlocking.AntiTracking.SOCIAL or ContentBlocking.AntiTracking.CRYPTOMINING
+        s.contentBlocking.setAntiTracking(if (store.adblock) mask else ContentBlocking.AntiTracking.NONE)
+    }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun createWeb() {
-        val w = WebView(this)
-        w.setBackgroundColor(Color.BLACK)
-        w.overScrollMode = View.OVER_SCROLL_NEVER
-        w.isVerticalScrollBarEnabled = false
-        w.isHorizontalScrollBarEnabled = false
-        w.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            setSupportZoom(true)
-            builtInZoomControls = true
-            displayZoomControls = false
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            allowFileAccess = false
-            allowContentAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            mediaPlaybackRequiresUserGesture = true
-            cacheMode = WebSettings.LOAD_DEFAULT
-            javaScriptCanOpenWindowsAutomatically = false
-            setSupportMultipleWindows(false)
-            setGeolocationEnabled(false)
+    private fun applySessionSettings(s: GeckoSession) {
+        if (store.desktop) {
+            s.settings.setUserAgentMode(GeckoSessionSettings.USER_AGENT_MODE_DESKTOP)
+            s.settings.setViewportMode(GeckoSessionSettings.VIEWPORT_MODE_DESKTOP)
+        } else {
+            s.settings.setUserAgentMode(GeckoSessionSettings.USER_AGENT_MODE_MOBILE)
+            s.settings.setViewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
         }
-        CookieManager.getInstance().setAcceptThirdPartyCookies(w, false)
-        applySettings(w)
+    }
 
-        w.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(view: WebView, r: WebResourceRequest): WebResourceResponse? {
-                val host = r.url.host
-                if (host == HOME_HOST) {
-                    return WebResourceResponse(
-                        "text/html", "utf-8", ByteArrayInputStream(homeHtml().toByteArray(Charsets.UTF_8))
-                    )
-                }
-                if (store.adblock && AdBlock.blocked(host)) return AdBlock.empty()
-                return null
+    private fun createSession() {
+        val rt = runtime()
+        val gv = GeckoView(this)
+        val s = GeckoSession()
+        applySessionSettings(s)
+
+        s.setContentDelegate(object : GeckoSession.ContentDelegate {
+            override fun onTitleChange(sess: GeckoSession, title: String?) {
+                curTitle = title ?: ""
             }
 
-            override fun shouldOverrideUrlLoading(view: WebView, r: WebResourceRequest): Boolean {
-                val s = r.url.scheme
-                if (s == "http" || s == "https" || s == "about" || s == "data" || s == "blob") return false
-                toast("Enlace externo bloqueado")
-                return true
+            override fun onFullScreen(sess: GeckoSession, fs: Boolean) {
+                setFullscreen(fs)
             }
 
-            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+            override fun onCrash(sess: GeckoSession) {
+                recoverSession()
+            }
+
+            override fun onKill(sess: GeckoSession) {
+                recoverSession()
+            }
+        })
+
+        s.setProgressDelegate(object : GeckoSession.ProgressDelegate {
+            override fun onPageStart(sess: GeckoSession, url: String) {
                 loading = true
-                pageError = false
                 reloadBtn.text = "✕"
                 showBar(true)
             }
 
-            override fun onPageFinished(view: WebView, url: String?) {
+            override fun onPageStop(sess: GeckoSession, success: Boolean) {
                 loading = false
                 reloadBtn.text = "↻"
                 ring.progress = 0
-                if (url == null) return
-                val home = isHome(url)
-                store.lastUrl = if (home || url.startsWith("data:") || url == "about:blank") "" else url
-                if (!home && !pageError && (url.startsWith("http://") || url.startsWith("https://"))) {
-                    store.addHistory(view.title ?: url, url)
-                    val vw = WIDTHS[store.widthIdx.coerceIn(0, WIDTHS.lastIndex)]
-                    if (vw > 0) {
-                        view.evaluateJavascript(
-                            "(function(){var m=document.querySelector('meta[name=viewport]');" +
-                                "if(!m){m=document.createElement('meta');m.name='viewport';" +
-                                "(document.head||document.documentElement).appendChild(m);}" +
-                                "m.content='width=" + vw + "';})()", null
-                        )
-                    }
+                val u = curUrl
+                if (success && (u.startsWith("http://") || u.startsWith("https://"))) {
+                    store.addHistory(curTitle.ifBlank { u }, u)
                 }
             }
 
-            override fun onReceivedError(view: WebView, r: WebResourceRequest, e: WebResourceError) {
-                if (r.isForMainFrame) {
-                    pageError = true
-                    view.loadDataWithBaseURL(
-                        null, errorHtml(r.url.toString(), e.description.toString()),
-                        "text/html", "utf-8", null
-                    )
-                }
+            override fun onProgressChange(sess: GeckoSession, progress: Int) {
+                ring.progress = if (progress >= 100) 0 else progress
+            }
+        })
+
+        s.setNavigationDelegate(object : GeckoSession.NavigationDelegate {
+            override fun onLocationChange(
+                sess: GeckoSession,
+                url: String?,
+                perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
+                hasUserGesture: Boolean
+            ) {
+                curUrl = url ?: ""
+                store.lastUrl =
+                    if (curUrl.isBlank() || isHome(curUrl) || curUrl.startsWith("about:")) "" else curUrl
             }
 
-            // Si el proceso del renderizador muere (poca RAM), recreamos el WebView en vez de cerrar la app
-            override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-                handler.post {
-                    val u = store.lastUrl
-                    destroyWeb(false)
-                    createWeb()
-                    web?.loadUrl(if (u.isBlank()) HOME else u)
-                }
-                return true
-            }
-        }
-
-        w.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView, newProgress: Int) {
-                ring.progress = if (newProgress >= 100) 0 else newProgress
+            override fun onCanGoBack(sess: GeckoSession, can: Boolean) {
+                canBack = can
             }
 
-            override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                if (customView != null) {
-                    callback.onCustomViewHidden()
-                    return
-                }
-                customView = view
-                customCb = callback
-                root.addView(view, FrameLayout.LayoutParams(-1, -1))
-                bar.visibility = View.GONE
+            override fun onCanGoForward(sess: GeckoSession, can: Boolean) {
+                canFwd = can
             }
 
-            override fun onHideCustomView() {
-                hideCustom()
+            // Enlaces target=_blank: se abren en la misma pestaña (una sola sesión = menos RAM)
+            override fun onNewSession(sess: GeckoSession, uri: String): GeckoResult<GeckoSession>? {
+                sess.loadUri(uri)
+                return null
             }
-        }
+        })
 
-        w.setDownloadListener { _, _, _, _, _ -> toast("Descargas no disponibles") }
+        s.setScrollDelegate(object : GeckoSession.ScrollDelegate {
+            override fun onScrollChanged(sess: GeckoSession, scrollX: Int, scrollY: Int) {
+                val d = scrollY - lastScrollY
+                lastScrollY = scrollY
+                if (scrollY < 8 || d < -6) showBar(true) else if (d > 6) showBar(false)
+            }
+        })
 
-        w.setOnScrollChangeListener { _, _, y, _, oy ->
-            val d = y - oy
-            if (y < 8 || d < -6) showBar(true) else if (d > 6) showBar(false)
-        }
-
-        webHolder.addView(w, FrameLayout.LayoutParams(-1, -1))
-        web = w
+        s.open(rt)
+        gv.setSession(s)
+        webHolder.addView(gv, FrameLayout.LayoutParams(-1, -1))
+        geckoView = gv
+        session = s
     }
 
-    private fun applySettings(w: WebView) {
-        val s = w.settings
-        s.textZoom = store.textZoom
-        s.blockNetworkImage = store.noImages
-        s.userAgentString = if (store.desktop) DESKTOP_UA else null
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-            WebSettingsCompat.setAlgorithmicDarkeningAllowed(s, store.dark)
+    private fun closeSession() {
+        val gv = geckoView
+        val s = session
+        if (gv != null) {
+            gv.releaseSession()
+            webHolder.removeView(gv)
         }
+        s?.close()
+        geckoView = null
+        session = null
+        canBack = false
+        canFwd = false
     }
 
-    private fun ensureWeb(restore: Boolean) {
-        if (web != null) return
-        createWeb()
-        val s = savedState
-        savedState = null
-        if (restore) {
-            if (s != null) web?.restoreState(s) else {
-                val u = store.lastUrl
-                web?.loadUrl(if (u.isBlank()) HOME else u)
-            }
+    /** El proceso de contenido murió (crash o poca RAM): recreamos la sesión y recargamos. */
+    private fun recoverSession() {
+        handler.post {
+            val u = if (curUrl.isBlank() || isHome(curUrl)) store.lastUrl else curUrl
+            closeSession()
+            createSession()
+            session?.loadUri(if (u.isBlank()) homeUrl() else u)
         }
     }
 
-    /** Destruye el WebView y guarda su estado (historial de navegación) para recrearlo luego. */
-    private fun destroyWeb(save: Boolean) {
-        val w = web ?: return
-        if (save) {
-            val b = Bundle()
-            w.saveState(b)
-            savedState = b
-        } else savedState = null
-        webHolder.removeView(w)
-        w.stopLoading()
-        w.webChromeClient = null
-        w.destroy()
-        web = null
-    }
-
-    private fun hideCustom() {
-        customView?.let { root.removeView(it) }
-        customCb?.onCustomViewHidden()
-        customView = null
-        customCb = null
-        bar.visibility = View.VISIBLE
+    private fun setFullscreen(fs: Boolean) {
+        fullscreen = fs
+        if (fs) {
+            bar.visibility = View.GONE
+        } else {
+            bar.visibility = View.VISIBLE
+            bar.alpha = 1f
+            bar.translationY = 0f
+            barVisible = true
+        }
     }
 
     // ------------------------------------------------------------------ navegación
 
-    private fun isHome(u: String?): Boolean = u != null && Uri.parse(u).host == HOME_HOST
+    private fun isHome(u: String?): Boolean = u != null && u.startsWith("data:text/html")
 
     private fun load(url: String) {
-        if (web == null) {
-            createWeb()
-            savedState = null
-        }
-        web?.loadUrl(url)
+        if (session == null) createSession()
+        session?.loadUri(url)
         closePanel()
     }
 
     private fun goBack() {
-        val w = web ?: return
-        if (w.canGoBack()) w.goBack() else load(HOME)
+        if (canBack) session?.goBack() else load(homeUrl())
     }
 
     private fun reloadOrStop() {
-        val w = web ?: return
-        if (loading) w.stopLoading() else w.reload()
+        if (loading) session?.stop() else session?.reload()
     }
 
     private fun toUrl(input: String): String {
         val t = input.trim()
-        if (t.isEmpty()) return HOME
+        if (t.isEmpty()) return homeUrl()
         if (t.startsWith("http://") || t.startsWith("https://")) return t
         if (!t.contains(' ') && (t.contains('.') || t.startsWith("localhost"))) return "https://" + t
         val e = ENGINES[store.engine.coerceIn(0, ENGINES.lastIndex)]
@@ -453,10 +402,12 @@ class MainActivity : Activity() {
         load(toUrl(text))
     }
 
-    // ------------------------------------------------------------------ páginas internas
+    // ------------------------------------------------------------------ página de inicio
 
     private fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         .replace("\"", "&quot;").replace("'", "&#39;")
+
+    private fun homeUrl(): String = "data:text/html;charset=utf-8," + Uri.encode(homeHtml())
 
     private fun homeHtml(): String {
         val e = ENGINES[store.engine.coerceIn(0, ENGINES.lastIndex)]
@@ -474,13 +425,6 @@ class MainActivity : Activity() {
             "<form action=\"" + e.second + "\"><input name=q placeholder=\"Buscar\" autocomplete=off></form>" +
             tiles + "</body></html>"
     }
-
-    private fun errorHtml(url: String, msg: String): String =
-        "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
-            "<style>body{background:#000;color:#ddd;font-family:sans-serif;text-align:center;padding:26% 14%}" +
-            "a{display:inline-block;margin-top:14px;padding:12px 22px;border-radius:22px;background:#1f3a5f;color:#fff;text-decoration:none}" +
-            "</style></head><body><h3>No se pudo cargar</h3><p>" + esc(msg) + "</p>" +
-            "<a href=\"" + esc(url) + "\">Reintentar</a></body></html>"
 
     // ------------------------------------------------------------------ UI: barra inferior
 
@@ -529,7 +473,7 @@ class MainActivity : Activity() {
     }
 
     private fun showBar(show: Boolean) {
-        if (show == barVisible || customView != null) return
+        if (show == barVisible || fullscreen) return
         barVisible = show
         bar.animate().cancel()
         if (show) {
@@ -656,25 +600,20 @@ class MainActivity : Activity() {
     }
 
     private fun openMenu() {
-        val w = web
         showPanel("Menú") { l ->
-            row(l, "🏠  Inicio") { load(HOME) }
+            row(l, "🏠  Inicio") { load(homeUrl()) }
             row(l, "⭐  Favoritos") { openList("Favoritos", store.bookmarks(), true) }
             row(l, "🕘  Historial") { openList("Historial", store.history(), false) }
-            val url = w?.url
-            if (url != null && !isHome(url) && url.startsWith("http")) {
+            val url = curUrl
+            if (url.startsWith("http")) {
                 val saved = store.hasBookmark(url)
                 row(l, if (saved) "★  Quitar favorito" else "☆  Guardar favorito") { toggleBookmark() }
             }
-            if (w?.canGoForward() == true) row(l, "▶  Adelante") {
+            if (canFwd) row(l, "▶  Adelante") {
                 closePanel()
-                web?.goForward()
+                session?.goForward()
             }
-            row(l, "📖  Modo lectura") {
-                closePanel()
-                web?.evaluateJavascript(READER_JS, null)
-            }
-            row(l, "🧹  Liberar RAM") { freeRam() }
+            row(l, "🧹  Liberar RAM  (" + totalPssMb() + " MB)") { freeRam() }
             row(l, "⚙  Ajustes") { openSettings() }
         }
     }
@@ -699,13 +638,13 @@ class MainActivity : Activity() {
     }
 
     private fun toggleBookmark() {
-        val w = web ?: return
-        val u = w.url ?: return
+        val u = curUrl
+        if (!u.startsWith("http")) return
         if (store.hasBookmark(u)) {
             store.removeBookmark(u)
             toast("Favorito quitado")
         } else {
-            store.addBookmark(w.title ?: u, u)
+            store.addBookmark(curTitle.ifBlank { u }, u)
             toast("Guardado ⭐")
         }
         closePanel()
@@ -713,23 +652,23 @@ class MainActivity : Activity() {
 
     private fun openSettings() {
         showPanel("Ajustes") { l ->
-            row(l, "🚫  Anuncios: " + onoff(store.adblock)) {
+            row(l, "🚫  Anuncios y rastreo: " + onoff(store.adblock)) {
                 store.adblock = !store.adblock
-                openSettings()
-            }
-            row(l, "🖼  Sin imágenes: " + onoff(store.noImages)) {
-                store.noImages = !store.noImages
-                web?.let { applySettings(it); if (!store.noImages) it.reload() }
+                sRuntime?.let { applyRuntimeSettings(it) }
                 openSettings()
             }
             row(l, "🖥  Modo escritorio: " + onoff(store.desktop)) {
                 store.desktop = !store.desktop
-                web?.let { applySettings(it); it.reload() }
+                session?.let {
+                    applySessionSettings(it)
+                    it.reload()
+                }
                 openSettings()
             }
             row(l, "🌙  Modo oscuro web: " + onoff(store.dark)) {
                 store.dark = !store.dark
-                web?.let { applySettings(it); it.reload() }
+                sRuntime?.let { applyRuntimeSettings(it) }
+                session?.reload()
                 openSettings()
             }
             row(l, "⭕  Ajuste redondo: " + onoff(store.roundFit)) {
@@ -737,10 +676,11 @@ class MainActivity : Activity() {
                 applyFit()
                 openSettings()
             }
-            val vw = WIDTHS[store.widthIdx.coerceIn(0, WIDTHS.lastIndex)]
-            row(l, "↔  Ancho virtual: " + (if (vw == 0) "Auto" else vw.toString())) {
-                store.widthIdx = (store.widthIdx + 1) % WIDTHS.size
-                web?.reload()
+            val dens = DENSITIES[store.densityIdx.coerceIn(0, DENSITIES.lastIndex)]
+            row(l, "↔  Escala de página: " + dens + "x  (menor = más contenido)") {
+                store.densityIdx = (store.densityIdx + 1) % DENSITIES.size
+                sRuntime?.let { applyRuntimeSettings(it) }
+                session?.reload()
                 openSettings()
             }
             row(l, "🔎  Buscador: " + ENGINES[store.engine.coerceIn(0, ENGINES.lastIndex)].first) {
@@ -749,12 +689,16 @@ class MainActivity : Activity() {
             }
             row(l, "🔠  Texto +  (" + store.textZoom + "%)") {
                 store.textZoom = (store.textZoom + 20).coerceAtMost(240)
-                web?.let { applySettings(it) }
+                sRuntime?.let { applyRuntimeSettings(it) }
                 openSettings()
             }
             row(l, "🔡  Texto −  (" + store.textZoom + "%)") {
                 store.textZoom = (store.textZoom - 20).coerceAtLeast(60)
-                web?.let { applySettings(it) }
+                sRuntime?.let { applyRuntimeSettings(it) }
+                openSettings()
+            }
+            row(l, "♻  Cerrar motor al salir (90 s): " + onoff(store.autoFree)) {
+                store.autoFree = !store.autoFree
                 openSettings()
             }
             row(l, "🗑  Borrar datos y caché") {
@@ -765,23 +709,35 @@ class MainActivity : Activity() {
     }
 
     private fun clearData() {
-        web?.apply {
-            clearCache(true)
-            clearHistory()
-        }
-        CookieManager.getInstance().removeAllCookies(null)
-        CookieManager.getInstance().flush()
-        WebStorage.getInstance().deleteAllData()
+        sRuntime?.storageController?.clearData(StorageController.ClearFlags.ALL)
         store.clearHistory()
         toast("Datos borrados")
     }
 
+    /** RAM total de WearNav: proceso principal + procesos de contenido de Gecko. */
+    private fun totalPssMb(): Int {
+        return try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val pids = am.runningAppProcesses
+                ?.filter { it.processName.startsWith(packageName) }
+                ?.map { it.pid }
+                ?.toIntArray() ?: intArrayOf(Process.myPid())
+            var kb = 0
+            for (m in am.getProcessMemoryInfo(pids)) kb += m.totalPss
+            kb / 1024
+        } catch (e: Throwable) {
+            0
+        }
+    }
+
+    /** Recrea la sesión (suelta la memoria de la página) y recarga la URL actual. */
     private fun freeRam() {
-        web?.clearCache(false)
+        val u = curUrl
+        closeSession()
+        createSession()
+        session?.loadUri(if (u.isBlank()) homeUrl() else u)
         System.gc()
-        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val kb = am.getProcessMemoryInfo(intArrayOf(Process.myPid()))[0].totalPss
-        toast("RAM app: " + (kb / 1024) + " MB")
         closePanel()
+        toast("Sesión reiniciada")
     }
 }

@@ -1,1 +1,3 @@
-# Sin reglas especiales: la app no usa reflexión.
+-dontwarn javax.annotation.**
+-dontwarn org.jspecify.annotations.**
+-dontwarn com.google.re2j.**

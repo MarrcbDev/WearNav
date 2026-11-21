@@ -3,24 +3,46 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Versión de GeckoView (Firefox 159). Cambia "159.+" por una versión exacta si quieres fijarla.
+val geckoVersion = "159.+"
+
 android {
     namespace = "com.marrdev.wearnav"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.marrdev.wearnav"
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+    }
+
+    // Un APK por arquitectura (cada uno lleva solo sus librerías nativas)
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = false
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Firmado con la clave debug para poder instalarlo directo por ADB
+            // Sin R8: GeckoView usa JNI/reflexión y no conviene ofuscarlo
+            isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -35,5 +57,5 @@ android {
 }
 
 dependencies {
-    implementation("androidx.webkit:webkit:1.11.0")
+    implementation("org.mozilla.geckoview:geckoview:$geckoVersion")
 }

@@ -1,28 +1,26 @@
 # WearNav
 
-Navegador ligero para Wear OS (probado en la idea para Galaxy Watch 5 Pro, pantalla redonda 450x450).
+Navegador para Wear OS (Galaxy Watch 5 Pro, pantalla redonda) basado en **GeckoView** (motor de Firefox).
+El reloj no incluye Android WebView, por eso la app trae su propio motor.
 
-- Una sola pestaña (menos RAM), WebView con ajustes seguros
-- Barra flotante que se oculta al bajar y reaparece al subir
-- Anillo de progreso que sigue el borde redondo
-- Bloqueo de anuncios por dominio, modo sin imágenes, modo lectura, modo oscuro web
-- Favoritos / historial, búsqueda por texto o voz, zoom de texto, ancho virtual
-- Gestión de RAM: pausa al salir, destruye el WebView a los 45 s en segundo plano (restaura el historial al volver), reacciona a onTrimMemory y al cierre del renderizador
+- Una sola pestaña, barra flotante que se oculta al hacer scroll, anillo de progreso en el borde
+- Favoritos, historial, búsqueda por texto o voz, 3 buscadores
+- Bloqueo de anuncios/rastreadores (protección de rastreo de Gecko), modo oscuro web, modo escritorio
+- Escala de página y tamaño de texto ajustables
+- RAM: pausa la sesión al salir y a los 90 s en segundo plano mata el proceso (guarda la URL); botón "Liberar RAM" con el consumo real (app + procesos de Gecko)
 
 ## Compilar
-Sube todo a GitHub (rama `main`) -> pestaña **Actions** -> "Build APK" -> descarga el artefacto `WearNav-apk`.
+Sube todo a GitHub -> pestaña **Actions** -> "Build APK" -> descarga el artefacto `WearNav-apk`.
+Salen dos APK: `app-arm64-v8a-release.apk` y `app-armeabi-v7a-release.apk`.
 
-## Instalar en el reloj
-Reloj: Ajustes > Opciones de desarrollador > Depuración ADB + Depuración por Wi-Fi
+## Cuál instalar
 ```
-adb pair IP:PUERTO_EMPAREJAMIENTO
-adb connect IP:PUERTO
-adb install -r app-release.apk
+adb shell getprop ro.product.cpu.abilist
+```
+Si aparece `arm64-v8a` instala el de arm64; si solo hay `armeabi-v7a`, el de v7a.
+```
+adb install -r app-arm64-v8a-release.apk
 ```
 
 ## Si se cierra al abrir
-WearNav guarda el motivo del cierre y lo muestra en pantalla al reabrir. Si quieres el log completo:
-```
-adb logcat -b crash
-```
-Si el error menciona "WebView", actualiza/instala *Android System WebView* desde Play Store en el reloj.
+WearNav guarda el motivo del cierre y lo muestra en pantalla al reabrir. Log completo: `adb logcat -b crash`
