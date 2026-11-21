@@ -12,6 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Limpiar archivos viejos del repo
+        run: |
+          cd app/src/main/java
+          rm -rf com/marrdev/wearbrowser
+          for f in com/marrdev/wearnav/*.kt; do
+            case "$(basename "$f")" in
+              MainActivity.kt|Store.kt|RingProgressView.kt|WearNavApp.kt) ;;
+              *) echo "Borrando sobrante: $f"; rm -f "$f" ;;
+            esac
+          done
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
