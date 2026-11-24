@@ -18,10 +18,11 @@ jobs:
           rm -rf com/marrdev/wearbrowser
           for f in com/marrdev/wearnav/*.kt; do
             case "$(basename "$f")" in
-              MainActivity.kt|Store.kt|RingProgressView.kt|WearNavApp.kt) ;;
+              MainActivity.kt|Store.kt|RingProgressView.kt|NavApp.kt) ;;
               *) echo "Borrando sobrante: $f"; rm -f "$f" ;;
             esac
           done
+          sed -i 's/\.WearNavApp/.NavApp/' ../AndroidManifest.xml
 
       - uses: actions/setup-java@v4
         with:

@@ -218,6 +218,7 @@ class MainActivity : Activity() {
             .javaScriptEnabled(true)
             .remoteDebuggingEnabled(false)
             .consoleOutput(false)
+            .displayDensityOverride(DENSITIES[store.densityIdx.coerceIn(0, DENSITIES.lastIndex)])
             .build()
         val rt = GeckoRuntime.create(applicationContext, settings)
         sRuntime = rt
@@ -230,7 +231,6 @@ class MainActivity : Activity() {
         s.setPreferredColorScheme(
             if (store.dark) GeckoRuntimeSettings.COLOR_SCHEME_DARK else GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
         )
-        s.setDisplayDensityOverride(DENSITIES[store.densityIdx.coerceIn(0, DENSITIES.lastIndex)])
         s.setFontSizeFactor(store.textZoom / 100f)
         val mask = ContentBlocking.AntiTracking.AD or ContentBlocking.AntiTracking.ANALYTIC or
             ContentBlocking.AntiTracking.SOCIAL or ContentBlocking.AntiTracking.CRYPTOMINING
@@ -677,11 +677,13 @@ class MainActivity : Activity() {
                 openSettings()
             }
             val dens = DENSITIES[store.densityIdx.coerceIn(0, DENSITIES.lastIndex)]
-            row(l, "↔  Escala de página: " + dens + "x  (menor = más contenido)") {
+            row(l, "↔  Escala de página: " + dens + "x  (menor = más contenido; reinicia la app)") {
                 store.densityIdx = (store.densityIdx + 1) % DENSITIES.size
-                sRuntime?.let { applyRuntimeSettings(it) }
-                session?.reload()
-                openSettings()
+                toast("Reiniciando para aplicar…")
+                handler.postDelayed({
+                    finishAndRemoveTask()
+                    Process.killProcess(Process.myPid())
+                }, 1200)
             }
             row(l, "🔎  Buscador: " + ENGINES[store.engine.coerceIn(0, ENGINES.lastIndex)].first) {
                 store.engine = (store.engine + 1) % ENGINES.size
